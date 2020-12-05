@@ -2,12 +2,41 @@
 
 `serveless-starter` provides all of the files that you need to begin a serverless project.
 
-* `serverless.yml`: A [serverless.io](https://serverless.io) manifest. Serverless makes
-  it almost-effortless to deploy serverless functions into almost any cloud.
-* `docker-compose.deploy.yml`: Docker Compose services that make it easier to deploy your
-  serverless app.
-* `docker-compose.ci.yml`: Docker Compose services that make it easier to set up CI/CD.
-* `scripts`: A collection of scripts that support infrastructure configuration and deployment.
-* `Makefile`: A Makefile that includes all of the steps needed to perform a deployment.
+1. Download the latest release into your project: `curl -o serverless-starter.zip INSERT_URL_HERE`
+2. Unzip it into your project: `unzip serverless-starter.zip`
+3. Create an environment dotfile and config.yml: `make create_env`.
+4. Edit `.env` and `config.yml` in your favorite editor.
+5. Hack on your code.
+6. Run `make deploy_integration` to deploy an integration environment to test your stuff in.
+   Delete it by running `make destroy_integration`.
+7. When you're ready, deploy it into production: `make deploy_production`.
 
-Please read through each file to learn more about what they do.
+Run `make usage` to learn everything that you can do with the `Makefile` included with
+`serverless-starter`.
+
+## Examples
+
+You can see a few example applications bootstrapped from `serverless-starter` in the
+`examples` directory. These examples actually work. If you want to deploy them,
+follow steps 1-4 from above and then run `scripts/run_example.sh [example-name]`
+
+## Seeing function logs
+
+If you'd like to see logs from your function, run: `scripts/logs.sh [function_name] [environment]`.
+(This assumes the integration environment by default.)
+
+## Encrypting and decrypting your environments
+
+When you run `make create_env`, your environment's dotfile is added to your project's `.gitignore`
+so that you never commit it by accident. Consequently, this also means that you'll lose
+your environment settings if you change computers or continue your work in a different environment.
+
+To prevent this from happening, encrypt your environment dotfile and commit _that_ so that you can
+decrypt it into your new working environment.
+
+To encrypt: `ENV_PASSWORD=your-password-here make encrypt_env`
+
+To decrypt: `ENV_PASSWORD=your-password-here make decrypt_env`
+
+Treat `ENV_PASSWORD` like the keys to your house (or the keys to your wallet)! Don't share it with
+anyone, and don't commit it into `config.yml`!

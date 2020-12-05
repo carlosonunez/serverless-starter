@@ -1,0 +1,62 @@
+---
+# If you want to remove support for custom domains, remove this.
+plugins:
+  - serverless-domain-manager
+
+service:
+  name: ${file(./config.yml):general.project}
+
+frameworkVersion: '>=1.0.0'
+
+# AWS is the only supported cloud at this time. Others will be supported in future
+# commits.
+provider:
+  name: aws
+  runtime: ${file(./config.yml):awslambda.runtime}
+  region: ${env:AWS_REGION, file(./config.yml):awslambda.default_region}
+  memorySize: 1024
+  deploymentBucket:
+    name: ${file(./secrets/bucket_name)}
+  deploymentPrefix: serverless
+  apiKeys:
+    - ${self:custom.keyName.${opt:stage, self:provider.stage}}
+  tracing:
+    apiGateway: ${file(./config.yml):awslambda.enable_api_gateway_tracing}
+
+# These file patterns tell Serverless what to include/exclude into your function.
+# This gets zipped up and pushed into a S3 bucket that Lambda will use to create your function.
+package:
+  exclude:
+    - ./** # Don't remmove this!
+  include:
+    # Add any directories/files you would like to include into your package here.
+    - bin/**
+
+# Define your functions here!
+# See the Serveless docs for more information on how to define your functions.
+functions:
+  example:
+    handler: bin/handler
+    description: An example function to prove that serverless-starter works.
+    timeout: 30
+    events:
+      - http:
+          path: example
+          method: get
+
+# These are parameters provided by serverless-starter to make some things
+# easier for you.
+custom:
+  keyName:
+    develop: ${file(./config.yml):general.project}-key-test
+    v1: ${file(./config.yml):general.project}-key-production
+  enableCustomDomain:
+    develop: false
+    v1: ${file(./config.yml):awslambda.enable_custom_domain}
+  customDomain:
+    stage: v1
+    domainName: ${env:DOMAIN_PATH}.${env:DOMAIN_TLD}
+    certificateArn: ${file(./secrets/certificate_arn), 'disabled'}
+    basePath: 'v1'
+    createRoute53Record: true
+    enabled: ${self:custom.enableCustomDomain.${opt:stage, self:provider.stage}}

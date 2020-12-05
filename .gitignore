@@ -1,0 +1,9 @@
+.env
+.terraform/
+.serverless/
+layers
+bin
+serverless.yml
+config.yml
+secrets
+package
