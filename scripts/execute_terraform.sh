@@ -21,6 +21,7 @@ export TF_VAR_app_account_name="$app_account_name"
 
 
 terraform init --backend-config="bucket=${TERRAFORM_STATE_S3_BUCKET}" \
+  --reconfigure \
   --backend-config="key=${TERRAFORM_STATE_S3_KEY}" \
   --backend-config="region=$AWS_REGION" && \
 

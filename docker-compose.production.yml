@@ -23,10 +23,9 @@ services:
   # to host your application.
   # Learn more at https://terraform.io.
   terraform:
-    build:
-      dockerfile: terraform.Dockerfile
-      context: .
+    image: hashicorp/terraform:0.12.29
     env_file: .env
+    entrypoint: /app/scripts/execute_terraform.sh
     environment:
       TERRAFORM_STATE_S3_KEY: ${TERRAFORM_STATE_S3_KEY}
       TF_VAR_environment: "production"

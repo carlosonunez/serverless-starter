@@ -2,7 +2,8 @@
 
 `serveless-starter` provides all of the files that you need to begin a serverless project.
 
-1. Download the latest release into your project: `curl -o serverless-starter.zip INSERT_URL_HERE`
+1. Download the latest release into your project:
+   `curl -o serverless-starter.zip https://github.com/carlosonunez/serverless-starter/archive/v1.0.0.zip`
 2. Unzip it into your project: `unzip serverless-starter.zip`
 3. Create an environment dotfile and config.yml: `make create_env`.
 4. Edit `.env` and `config.yml` in your favorite editor.

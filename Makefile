@@ -3,7 +3,7 @@ SHELL := /usr/bin/env bash
 DOCKER_COMPOSE := $(shell which docker-compose)
 DOCKER_COMPOSE_CI := $(DOCKER_COMPOSE) -f docker-compose.ci.yml
 DOCKER_COMPOSE_INTEGRATION := $(shell which docker-compose) -f docker-compose.integration.yml
-DOCKER_COMPOSE_PRODUCTION := $(shell which docker-compose) -f docker-compose.integration.yml
+DOCKER_COMPOSE_PRODUCTION := $(shell which docker-compose) -f docker-compose.production.yml
 ENV_PASSWORD ?= false ## Provide an environment password for encrypt_env and decrypt_env.
 DEPLOY_FUNCTIONS_ONLY ?= false ## Do you want to skip building infrastructure and just deploy functions? Only applicable in integration.
 SLS_DEBUG ?= false ## Set this to true to print debugging info from Serverless.
@@ -60,7 +60,7 @@ destroy_integration: ## Destroys the serverless integration environment.
 	done
 
 deploy_production: ## Deploys serverless functions into a production environment.
-	if ! test -z "$(DEPLOY_FUNCTIONS_ONLY)"; \
+	if test "$(DEPLOY_FUNCTIONS_ONLY)" != "false"; \
 	then \
 		>&2 echo "WARNING: DEPLOY_FUNCTIONS_ONLY only applies during integration testing."; \
 	fi; \
