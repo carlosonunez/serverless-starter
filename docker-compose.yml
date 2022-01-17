@@ -1,0 +1,139 @@
+# These services make it easy to perform unit- and integration-tests
+# against your app.
+# We're using Docker-Compose v2.2 to allow us to "extend" services across
+# each other.
+version: '2.2'
+services:
+  # If your app is NOT running inside of Docker, you'll need to vendor your
+  # dependencies. This way, Lambda can properly resolve libraries it needs
+  # for your function to run.
+  #
+  # Define how vendoring is done inside of 'scripts/vendor.sh'
+  #
+  # Ensure that your script writes its vendored deps into the 'vendor' top-level
+  # folder.
+  vendor:
+    build:
+      context: .
+    entrypoint: sh
+    volumes:
+      - "$PWD/vendor:/vendor"
+    command:
+      - ./scripts/vendor.sh
+      - -c
+      - >-
+        bundle install &&
+        cp -R /usr/local/bundle /vendor &&
+        chmod -R +x /vendor/bundle/bin
+
+:qa
+  # If your app needs to scrape a website, you'll find these services useful.
+  # These next two Compose services provide x86-64 and arm-compatible instances
+  # of Selenium. Each come with Selenium Hub and VNC installed (so that you can
+  # see Selenium at work.)
+  selenium-x86_64:
+    image: selenium/standalone-chrome
+    environment:
+      ENVIRONMENT: test
+    volumes:
+      - /dev/shm:/dev/shm
+    ports:
+      - 4444:4444
+      - 5901:5900
+  selenium-arm64:
+    image: seleniarm/standalone-chromium
+    environment:
+      ENVIRONMENT: test
+    volumes:
+      - /dev/shm:/dev/shm
+    ports:
+      - 4444:4444
+      - 5901:5900
+
+  # This is your app.
+  app:
+    build:
+      context: .
+      args:
+        ENVIRONMENT: test
+    env_file: .env
+
+  # These are your unit tests.
+  # You will need to vendor your dependencies first before running unit tests.
+  # scripts/unit does this for you automatically.
+  unit:
+    extends: app
+    entrypoint: rspec
+    environment:
+      LOAD_PATH: "./spec/unit;./spec;./lib"
+    volumes:
+      - /dev/null:/dev/shm
+    command:
+      - --tag
+      - unit
+      - --fail-fast
+      - --format
+      - documentation
+  integration-test-ping:
+    extends: app
+    command:
+      - bin/flight-info.get_ping
+  integration-test-test_internet_access:
+    extends: app
+    command:
+      - bin/flight-info.test_internet_access
+  integration-test-test_flight_info:
+    extends: app
+    command:
+      - bin/flight-info.get_flight_info
+  # Why do we need this?
+  #
+  # PhantomJS stopped rendering FlightAware sometime in 2020. Consequently, we now
+  # have to use Chromium to scrape it.
+  #
+  # Unfortunately, fitting Chromium inside of a Lambda layer is challenging, and even if you manage
+  # to get it to fit (and writing your own JIT decompression routine since you'll likely use
+  # Brotli like the chrome-lambda Node project is doing), testing it locally is tough unless
+  # you're using the lambci/lambda Docker image (which only works for x86_64 architectures...
+  # more on that later).
+  #
+  # Fortunately, Lambda can now spawn Docker containers from OCI-compliant images in ECR. This
+  # is a god-send for local testing, as you can now execute your code in the same environment
+  # as what it will run in on the real thing. However, executing functions through the
+  # Lambda Interface Emulator is not as straightforward as running them through app since
+  # you're actually executing them like Lambda functions (i.e. through a handler invoked via HTTP).
+  #
+  # This series of tests confirms that:
+  #
+  # - The RIE and its requisite client are set up correctly, and
+  # - That Selenium can talk to the instance of Chromium that's installed in our base image
+  #   through the RIE.
+  integration-docker:
+    extends: app
+    entrypoint: rspec
+    env_file: .env
+    environment:
+      LOAD_PATH: "spec/integration;spec;lib"
+      USE_LOCAL_LAMBDA: "true"
+    volumes:
+      - "$PWD/secrets:/secrets"
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - --tag
+      - integration
+      - --fail-fast
+      - --format
+      - documentation
+  integration:
+    extends: app
+    entrypoint: rspec
+    env_file: .env
+    volumes:
+      - "$PWD/secrets:/secrets"
+    command:
+      - --tag
+      - integration
+      - --fail-fast
+      - --format
+      - documentation
+

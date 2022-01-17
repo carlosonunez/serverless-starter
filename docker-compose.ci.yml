@@ -1,12 +1,12 @@
-version: '3.7'
+version: '2.2'
 services:
-  # encrypt-env allows you to store an encrypted version of important environmen
-  # variables, specifically those used by serverless.
-  encrypt-env:
+  gpg:
     image: vladgh/gpg
-    working_dir: /app
     volumes:
       - $PWD:/app
+    working_dir: /app
+  encrypt-env:
+    extends: gpg
     command:
       - --batch
       - --yes
@@ -14,17 +14,11 @@ services:
       - --output=env.gpg
       - --symmetric
       - .env
-  # decrypt-env decrypts environment variables encrypted by `encrypt-env`.
   decrypt-env:
-    image: vladgh/gpg
-    working_dir: /app
-    volumes:
-      - $PWD:/app
+    extends: gpg
     command:
-      - --decrypt
-      - --batch
-      - --yes
-      - --passphrase=$ENV_PASSWORD
-      - --output=.env
+      - '--decrypt'
+      - '--batch'
+      - "--passphrase=$ENV_PASSWORD"
+      - '--output=.env'
       - env.gpg
-

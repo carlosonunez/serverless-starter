@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+source $(dirname "$0")/helpers/shared_secrets.sh
+source $(dirname "$0")/helpers/logging.sh
+source $(dirname "$0")/helpers/aws.sh
+if test -f "$(dirname "$0")/../.env"
+then
+  export $(grep -Ev '^#' "$(dirname "$0")/../.env" | xargs -0)
+fi
+export AWS_SESSION_NAME="${TF_VAR_app_name}-session-$(date +%s)"
+AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID?Please define AWS_ACCESS_KEY_ID}"
+AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY?Please define AWS_SECRET_ACCESS_KEY}"
+AWS_REGION="${AWS_REGION?Please define AWS_REGION}"
+AWS_ROLE_ARN="${AWS_ROLE_ARN?Please define AWS_ROLE_ARN}"
+AWS_STS_EXTERNAL_ID="${AWS_STS_EXTERNAL_ID?Please define AWS_STS_EXTERNAL_ID}"
+ENVIRONMENT="${ENVIRONMENT:-test}"
+DEPLOY_FUNCTIONS_ONLY="${DEPLOY_FUNCTIONS_ONLY:-false}"
+AWS_ECR_ENABLE="${AWS_ECR_ENABLE:-false}"
+AWS_ECR_REPUSH="${AWS_ECR_REPUSH:-false}"
+AWS_ECR_DONT_BUILD_FROM_CACHE="${AWS_ECR_DONT_BUILD_FROM_CACHE:-false}"
+AWS_ECR_REPO_NAME="${TF_VAR_app_name}-${ENVIRONMENT}"
+DOCKER_COMPOSE_DEPLOY="docker-compose -f docker-compose.deploy.yml"
+set -e
+
+usage() {
+  cat <<-USAGE
+$(basename $0)
+Deploys our functions onto serverless infrastructure.
+
+ARGUMENTS
+
+  -h, --help                    Prints this help screen.
+
+ENVIRONMENT VARIABLES
+
+  ENVIRONMENT=test              The environment being deployed into.
+
+  DEPLOY_FUNCTIONS_ONLY=false   Disable re-deploying infrastructure and skip
+                                straight to deploying functions.
+
+  AWS_ECR_ENABLE                Enable building dual-architecture Docker images
+                                into AWS ECR.
+
+  AWS_ECR_REPUSH                Re-push Docker images into AWS ECR.
+                                No effect if AWS_ECR_ENABLE=false.
+
+  AWS_ECR_DONT_BUILD_FROM_CACHE Always force images bound for AWS ECR to be
+                                built from scratch.
+
+                                THIS ADDS SIGNIFICANTLY GREATER TIMES TO YOUR
+                                BUILD; USE WITH CAUTION.
+
+NOTES
+
+  - If setting AWS_ECR_ENABLE=true, also make sure that your "provider" block
+    inside of "serverless.yml" looks like this:
+
+    provider:
+      name: aws
+      runtime: # Your runtime
+      ...
+      ecr:
+        images:
+          app:
+            uri: \${file(./secrets/ecr_repository)}:app-\${self:custom.architecture}
+
+    And that you have a "custom" block that looks like this:
+
+    custom:
+      architecture: arm64 # or amd64
+
+USAGE
+}
+
+
+write_lambda_secrets() {
+  grep -iq "production" <<< "$ENVIRONMENT" && return 0
+
+  stage="develop"
+  info "Getting integration test API Gateway endpoint."
+  endpoint_url=$($DOCKER_COMPOSE_DEPLOY run \
+      --rm serverless info --stage "$stage" | \
+    grep -E 'http.*\/ping' | \
+    sed 's/.*\(http.*\)\/ping/\1/' | \
+    tr -d $'\r' | \
+    tr -d $'\n')
+
+  info "Getting API Gateway default API key."
+  api_key=$($DOCKER_COMPOSE_DEPLOY \
+      run --rm serverless info --stage "$stage" | \
+    grep -E 'default_key_test:' | \
+    sed 's/.*default_key_test: //' | \
+    tr -d $'\r' | \
+    tr -d $'\n'
+  )
+  if test -z "$endpoint_url"
+  then
+    error "We couldn't find a deployed endpoint."
+    exit 1
+  fi
+  if test -z "$api_key"
+  then
+    error "We couldn't find an API key."
+    exit 1
+  fi
+  write_secret "$endpoint_url" "endpoint_name"
+  write_secret "$api_key" "api_key"
+}
+
+write_infrastructure_secrets() {
+  info "Getting infrastructure secrets."
+  tf_output=$(2>&1 $DOCKER_COMPOSE_DEPLOY run \
+    -e ENVIRONMENT="$ENVIRONMENT" \
+    --rm \
+    terraform output | tr -d $'\r')
+  info "Output: $tf_output"
+  for output_var in app_account_ak app_account_sk certificate_arn \
+    ecr_repository_password
+  do
+    secret_value=$(grep -E "^$output_var = " <<< "$tf_output" | \
+      sed "s/^$output_var = //")
+    if test -z "$secret_value"
+    then
+      error "===> ${output_var}: retrieval failed"
+      exit 1
+    fi
+    info "===> ${output_var}: retrieved"
+    write_secret "$secret_value" "$output_var"
+  done
+}
+
+push_app_to_ecr() {
+  grep -Eiq '^true$' <<< "$AWS_ECR_ENABLE"  || return 0
+
+  info "Pushing app into ECR"
+  repository="$(read_secret "ecr_repository")"
+  docker login "$repository" --username AWS --password \
+    "$(read_secret "ecr_repository_password")" || return 1
+
+  for arch in amd64 arm64
+  do
+    export DOCKER_DEFAULT_PLATFORM="linux/$arch"
+    info "Pushing app into ECR, platform: $arch"
+    image_name="$repository:app-$arch"
+    if grep -Eiq '^true$' <<< "$AWS_ECR_REPUSH" ||
+      test -z "$(docker images "$repository" | grep -Eq '^REPOSITORY')"
+    then
+      if grep -Eiq '^true$' <<< "$AWS_ECR_DONT_BUILD_FROM_CACHE"
+      then
+        docker build --platform="linux/$arch" --no-cache --pull \
+          -t "$image_name" .
+      else
+        # Image might not exist in ECR when we try to pull it.
+        # Without doing this, it will take ~20 mins for integration to run.
+        # My wallet would like to prevent this.
+        docker pull "$image_name" || true
+        docker build --platform="linux/$arch" -t "$image_name" .
+      fi
+      docker push "$image_name"
+    fi
+  done
+}
+
+get_existing_ecr_repository() {
+  grep -Eiq '^true$' <<< "$AWS_ECR_ENABLE"  || return 1
+  
+  2>/dev/null $DOCKER_COMPOSE_DEPLOY run -T --rm \
+    aws-authenticated ecr describe-repositories --repository-names "${AWS_ECR_REPO_NAME}" \
+      --query 'repositories[*].repositoryUri' --output text
+}
+
+deploy_serverless_infrastructure() {
+  create_ecr_if_desired() {
+    grep -Eiq '^true$' <<< "$AWS_ECR_ENABLE"  || return 0
+
+    if test -z "$(get_existing_ecr_repository)"
+    then
+      info "Creating ECR repository: $AWS_ECR_REPO_NAME"
+      $DOCKER_COMPOSE_DEPLOY run --rm aws-authenticated ecr create-repository \
+        --repository-name "$AWS_ECR_REPO_NAME"
+    fi
+    write_secret "$(get_existing_ecr_repository)" "ecr_repository"
+  }
+
+  export $(get_aws_credentials)
+  info "Deploying serverless infrastructure."
+  if ! $DOCKER_COMPOSE_DEPLOY run --rm deploy-serverless-infra-"$ENVIRONMENT"
+  then
+    error "Failed to deploy infrastructure"
+    exit 1
+  fi
+  write_infrastructure_secrets &&
+  create_ecr_if_desired &&
+  if test "$ENVIRONMENT" == "production"
+  then
+    $DOCKER_COMPOSE_DEPLOY build deploy-serverless-domain-production &&
+    $DOCKER_COMPOSE_DEPLOY run --rm deploy-serverless-domain-production
+  fi
+}
+
+deploy_serverless_functions() {
+  pull_down_existing_images_to_speed_up_builds() {
+    grep -Eiq '^true$' <<< "$AWS_ECR_ENABLE"  || return 0
+
+    info "Pulling down existing images from ECR repositories, if any"
+    for arch in arm64 amd64
+    do
+      docker pull "$(read_secret ecr_repository):app-$arch" || true
+    done
+  }
+
+  info "Deploying serverless functions."
+  export $(get_aws_credentials)
+  $DOCKER_COMPOSE_DEPLOY build deploy-serverless-functions-"$ENVIRONMENT" &&
+  $DOCKER_COMPOSE_DEPLOY run --rm deploy-serverless-functions-"$ENVIRONMENT" &&
+    write_lambda_secrets
+}
+
+remove_secret_folder_if_present() {
+  test -d "$(dirname "$0")/../secrets" && rm -rf "$(dirname "$0")/../secrets" || true
+}
+
+if [ "$1" == "-h" ] || [ "$1" == "--help" ]
+then
+  usage
+  exit 0
+fi
+
+trap 'remove_aws_credentials' INT EXIT
+
+generate_aws_credentials || exit 1
+if [ "$DEPLOY_FUNCTIONS_ONLY" == "true" ]
+then
+  warn "Only deploying functions, as requested."
+  deploy_serverless_functions
+else
+  remove_secret_folder_if_present &&
+    deploy_serverless_infrastructure &&
+    push_app_to_ecr &&
+    deploy_serverless_functions
+fi

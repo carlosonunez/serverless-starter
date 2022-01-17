@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+source $(dirname "$0")/helpers/logging.sh
+KEEP_ENV_UP="${KEEP_ENV_UP:-false}"
+DEPLOY_FUNCTIONS_ONLY="${DEPLOY_FUNCTIONS_ONLY:-false}"
+VENDOR_ANYWAY="${VENDOR_ANYWAY:-false}"
+NO_DEPLOY="${NO_DEPLOY:-false}"
+NO_VENDOR="${NO_VENDOR:-false}"
+export REBUILD="${REBUILD:-false}"
+
+set -e
+
+usage() {
+  cat <<-USAGE
+$(basename "$0")
+Stages our integration environment and runs our integration tests.
+
+ARGUMENTS
+
+  -h, --help                        Prints this help screen.
+      --docker                      Runs Docker-local integration tests.
+
+ENVIRONMENT VARIABLES
+
+  ENVIRONMENT=test                  The environment being deployed into.
+
+  VENDOR_ANYWAY=false               Force dependencies to be downloaded locally.
+
+  DEPLOY_FUNCTIONS_ONLY=false       Disable re-deploying infrastructure and skip
+                                    straight to deploying functions.
+
+  KEEP_ENV_UP=false                 Will disable tearing down the integration environment.
+                                    Useful if you're running into bugs in integration
+                                    that need debugging.
+
+  NO_DEPLOY=false                   Don't deploy anything; use what's available, if anything
+
+  REBUILD=false                     Rebuilds the "integration-docker" Docker service.
+                                    Only applicable when running with --docker flag.
+
+  NO_VENDOR=false                   Skip vendoring dependencies.
+                                    Useful if you are running your function in a Lambda container.
+
+USAGE
+}
+
+# You might want to add a script that only triggers vendoring if specific changes
+# were found. To do that, add 'detect-changes.bash' to the 'helpers' directory.
+changes_detected() {
+  if test -f "$SCRIPT_DIR/helpers/detect-changes.bash"
+  then
+    "$SCRIPT_DIR/helpers/detect-changes.bash"
+  else
+    false
+  fi
+}
+
+vendor_dependencies() {
+  grep -Eiq '^true$' <<< "$NO_VENDOR" && return
+
+  info "Updating app dependencies."
+  if ! test -d "./vendor" || grep -Eiq '^true$' <<< "$VENDOR_ANYWAY"
+  then
+    ! test -d "./vendor" && mkdir "./vendor"
+    docker-compose run --rm vendor
+  fi
+}
+
+update_app_in_integration_service() {
+  info "Updating app in integration Docker service."
+  docker-compose build integration
+}
+
+selenium_service() {
+  if grep -Eiq 'arm' <<< "$(uname -m)"
+  then
+    echo "selenium-arm64"
+  else
+    echo "selenium-x86_64"
+  fi
+}
+
+deploy_to_integration() {
+  if grep -Eiq '^false$' <<< "$NO_DEPLOY"
+  then
+    info "Deploying integration environment."
+    ENVIRONMENT=test DEPLOY_FUNCTIONS_ONLY="$DEPLOY_FUNCTIONS_ONLY" scripts/deploy
+  fi
+}
+
+setup() {
+  ./scripts/integration_setup.sh
+}
+
+teardown() {
+  if [ "$KEEP_ENV_UP" == "true" ]
+  then
+    info "Integration environment will stay up as requested. \
+Tear it down by running: docker-compose run --rm integration-teardown."
+  else
+    scripts/integration_teardown.sh
+  fi
+}
+
+run_integration_tests() {
+  attempts=1
+  while test "$attempts" -le 5
+  do
+    info "Running integration tests (attempt $attempts/5)"
+    SELENIUM_HOST="$(selenium_service)" \
+      SELENIUM_PORT=4444 \
+      docker-compose run --service-ports --rm integration && return
+    attempts=$((attempts+1))
+  done
+  error "Integration tests failed after five attempts"
+}
+
+run_docker_local_integration_tests() {
+  info "Running Docker-local integration tests."
+  if grep -Eiq '^true$' <<< "$REBUILD" || changes_detected
+  then
+    info "App changes detected. Rebuilding integration Docker service."
+    docker-compose build integration-docker || exit 1
+  fi
+
+  SELENIUM_HOST="$(selenium_service)" \
+    SELENIUM_PORT=4444 \
+    docker-compose run --service-ports --rm integration-docker
+}
+
+if [ "$1" == "-h" ] || [ "$1" == "--help" ]
+then
+  usage
+  exit 0
+fi
+
+if [ "$DEPLOY_FUNCTIONS_ONLY" != "true" ]
+then
+  vendor_dependencies
+fi
+if [ "$1" == "--docker" ]
+then
+  DISABLE_API_GATEWAY_FETCH=true setup &&
+  run_docker_local_integration_tests
+  teardown
+else
+  update_app_in_integration_service &&
+  setup &&
+  deploy_to_integration &&
+  run_integration_tests
+  return_code="$?"
+  teardown
+fi
+exit "$?"
